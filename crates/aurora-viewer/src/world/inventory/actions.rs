@@ -539,15 +539,20 @@ pub fn clean_name(name: &str) -> Result<String, String> {
     }
     Ok(name.chars().take(63).collect())
 }
+/// The name `create_folder` gives a folder asked for as `name`: what a
+/// lookup for an existing folder of that name compares with.
+pub fn new_folder_name(name: &str) -> Result<String, String> {
+    // Names can come from translated defaults or object/file labels,
+    // rather than an edit. Keep creation usable after prevalidation.
+    Ok(crate::text_validation::generated_name(&clean_name(name)?, 63))
+}
 pub fn create_folder(parent: Uuid, name: &str) -> Result<Mutation, String> {
     let id = Uuid::new_v4();
     Ok(Mutation {
         operations: vec![Operation::Folder {
             id,
             parent,
-            // Names can come from translated defaults or object/file labels,
-            // rather than an edit. Keep creation usable after prevalidation.
-            name: crate::text_validation::generated_name(&clean_name(name)?, 63),
+            name: new_folder_name(name)?,
             type_default: -1,
         }],
         refresh: vec![parent, id],

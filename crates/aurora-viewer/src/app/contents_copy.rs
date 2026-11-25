@@ -8,6 +8,7 @@
 use super::*;
 use crate::ui::object_actions::{CopyConfirm, CopyRequest};
 use crate::world::appearance::{FT_CLOTHING, WearMode};
+use crate::world::folder_path::PathWalk;
 use crate::world::inventory::actions as rules;
 use crate::world::notifications::{Data, Kind};
 use std::collections::{HashMap, HashSet};
@@ -70,6 +71,16 @@ pub(super) struct ContentsCopies {
     copies: Vec<PendingCopy>,
     /// Folders to wear once all their items are in.
     wear: Vec<Wear>,
+    /// The subfolder levels of an "Accept in" destination on their way, by the
+    /// request of the level in progress.
+    walks: HashMap<Uuid, CopyWalk>,
+}
+
+/// A copy waiting for its subfolder path: the walk down it, and the copy.
+struct CopyWalk {
+    id: Uuid,
+    request: CopyRequest,
+    path: PathWalk,
 }
 
 struct FolderCreation {
@@ -175,6 +186,11 @@ struct Wear {
 }
 
 impl ContentsCopies {
+    /// A reply for one of the subfolder levels of a copy.
+    pub fn owns_walk(&self, request: Uuid) -> bool {
+        self.walks.contains_key(&request)
+    }
+
     pub fn owns(&self, request: Uuid) -> bool {
         self.folders.contains_key(&request)
     }
@@ -190,6 +206,22 @@ impl ContentsCopies {
                     None
                 }
             })
+            .collect()
+    }
+
+    /// The copies whose subfolder level has waited too long for its reply:
+    /// their walk ends (a late reply is then ignored), with the copy's name.
+    fn expired_walks(&mut self, now: Instant) -> Vec<(Uuid, String)> {
+        let expired: Vec<Uuid> = self
+            .walks
+            .iter()
+            .filter(|(_, walk)| walk.path.timed_out(now))
+            .map(|(level, _)| *level)
+            .collect();
+        expired
+            .into_iter()
+            .filter_map(|level| self.walks.remove(&level))
+            .map(|walk| (walk.id, crate::build::task_inventory::contents_folder_name(&walk.request.name)))
             .collect()
     }
 
@@ -331,7 +363,12 @@ impl App {
         // "Accept in" (Catznip): the chosen folder when it is usable now, else
         // the usual place
         // a chosen folder has already passed the same usable rule
-        let chosen = crate::world::contents_destination::parent(request.destination, request.source_folder, inv);
+        let chosen = crate::world::contents_destination::destination_folder(
+            request.destination,
+            request.source_folder,
+            inv,
+            &self.world.accept_in_saved,
+        );
         let parent = chosen.unwrap_or_else(|| {
             if request.wear.is_some() {
                 crate::world::appearance::system_folder(inv, FT_CLOTHING).unwrap_or(inv.root)
@@ -343,6 +380,93 @@ impl App {
             self.contents_copy_failed(id, aurora_i18n::tr!("task-transfer-destination").to_owned());
             return;
         }
+        // the subfolder levels of a saved destination are found or made first,
+        // one by one; a saved folder that is not usable now gives the usual
+        // place alone, without its subfolders
+        let levels = match chosen.map(|_| self.subfolder_levels(request.destination)) {
+            None => Vec::new(),
+            Some(Ok(levels)) => levels,
+            Some(Err(reason)) => {
+                self.contents_copy_failed(id, reason);
+                return;
+            }
+        };
+        if levels.is_empty() {
+            self.create_contents_folder_in(id, request, parent);
+            return;
+        }
+        let mut path = PathWalk::new(parent, levels);
+        match path.next_level(&self.world.inventory) {
+            Ok(Some(change)) => self.send_walk_level(CopyWalk { id, request, path }, change),
+            // every level is there already: the item's folder goes in the last
+            Ok(None) => {
+                let last = path.folder();
+                self.create_contents_folder_in(id, request, last);
+            }
+            Err(reason) => self.contents_copy_failed(id, reason),
+        }
+    }
+
+    /// The subfolder levels of the destination, its tokens expanded for today and
+    /// this region. Empty for a destination without a subfolder.
+    fn subfolder_levels(&self, destination: crate::world::contents_destination::Destination) -> Result<Vec<String>, String> {
+        let crate::world::contents_destination::Destination::Saved(entry) = destination else {
+            return Ok(Vec::new());
+        };
+        let Some(entry) = crate::world::contents_destination::find_saved(&self.world.accept_in_saved, entry) else {
+            return Ok(Vec::new());
+        };
+        if entry.subfolder.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let today = chrono::Local::now().date_naive();
+        let region = self.world.region_name();
+        let path = crate::world::contents_destination::expand(&entry.subfolder, today, &region);
+        crate::world::contents_destination::subfolder_parts(&path).ok_or_else(|| aurora_i18n::tr!("contents-accept-in-too-deep").to_owned())
+    }
+
+    /// Send the change that makes the next subfolder level, and keep the walk for
+    /// its reply.
+    fn send_walk_level(&mut self, walk: CopyWalk, change: aurora_net::inventory::operations::Mutation) {
+        let level = Uuid::new_v4();
+        self.contents_copies.walks.insert(level, walk);
+        self.send(NetCommand::EditInventory { request: level, change });
+    }
+
+    /// The reply of one subfolder level: the walk goes on to the next level, or,
+    /// once every level is there, the item's own folder is made in the last one.
+    pub(super) fn contents_copy_walk_result(&mut self, level: Uuid, result: Result<aurora_net::inventory::operations::Reply, String>) {
+        let Some(mut walk) = self.contents_copies.walks.remove(&level) else {
+            return;
+        };
+        let reply = match result {
+            Ok(reply) => reply,
+            Err(reason) => {
+                self.contents_copy_failed(walk.id, reason);
+                return;
+            }
+        };
+        let folder = walk.path.asked().map(|asked| reply.created.get(&asked).copied().unwrap_or(asked));
+        self.world.inventory.remove(&reply.removed);
+        self.world.inventory.apply(reply.contents);
+        self.world.inventory.created_folders(reply.folders);
+        if let Err(reason) = walk.path.made(folder) {
+            self.contents_copy_failed(walk.id, reason);
+            return;
+        }
+        match walk.path.next_level(&self.world.inventory) {
+            Ok(Some(change)) => self.send_walk_level(walk, change),
+            Ok(None) => {
+                let (id, request, parent) = (walk.id, walk.request, walk.path.folder());
+                self.create_contents_folder_in(id, request, parent);
+            }
+            Err(reason) => self.contents_copy_failed(walk.id, reason),
+        }
+    }
+
+    /// The item's own folder, named after the object, made in `parent`.
+    fn create_contents_folder_in(&mut self, id: Uuid, request: CopyRequest, parent: Uuid) {
+        let name = crate::build::task_inventory::contents_folder_name(&request.name);
         let change = match rules::create_folder(parent, &name) {
             Ok(change) => change,
             Err(reason) => {
@@ -452,6 +576,15 @@ impl App {
     pub(super) fn contents_copy_tick(&mut self, now: Instant) {
         for (id, name) in self.contents_copies.expired_folders(now) {
             self.contents_copy_failed(id, aurora_i18n::tr!("contents-copy-folder-timeout", folder = name.as_str()));
+        }
+        // a subfolder level of an "Accept in" destination that never answered:
+        // the copy stops as for its own folder, an offer is accepted into the
+        // usual place
+        for (id, name) in self.contents_copies.expired_walks(now) {
+            self.contents_copy_failed(id, aurora_i18n::tr!("contents-copy-folder-timeout", folder = name.as_str()));
+        }
+        for command in self.world.expired_offer_walks(now) {
+            self.send(command);
         }
         for (copy, state) in self.contents_copies.poll(&self.world.inventory, now) {
             match state {

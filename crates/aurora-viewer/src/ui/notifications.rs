@@ -820,23 +820,44 @@ pub(super) fn card(
                     None,
                     &world.inventory,
                 );
-                // (the choice's value, the folder it files in, its label)
-                let mut options: Vec<(u8, Option<uuid::Uuid>, String)> =
-                    vec![(0, None, aurora_i18n::tr!("contents-accept-in-default").to_owned())];
+                use crate::world::contents_destination::{Destination, destination_folder, offer_start};
+                // (the choice, the folder it files in, its label)
+                let mut options: Vec<(Destination, Option<uuid::Uuid>, String)> = vec![(
+                    Destination::Default,
+                    None,
+                    aurora_i18n::tr!("contents-accept-in-default").to_owned(),
+                )];
                 if let Some(folder) = object {
                     options.push((
-                        1,
+                        Destination::ObjectFolder,
                         Some(folder),
                         aurora_i18n::tr!("contents-accept-in-object", name = folder_name(folder)).to_owned(),
                     ));
                 }
                 if let Some(folder) = received {
-                    options.push((2, Some(folder), folder_name(folder)));
+                    options.push((Destination::ReceivedItems, Some(folder), folder_name(folder)));
                 }
-                // one choice for every offer, kept for the next ones: checked and
-                // the object's folder to begin with (the value 1)
-                let key = egui::Id::unique("offer_accept_in_last");
-                let (mut on, mut choice) = ui.ctx().data_mut(|d| d.get_persisted::<(bool, u8)>(key)).unwrap_or((true, 1));
+                // this account's saved destinations, after the rest, those whose
+                // folder is usable now
+                for saved in &world.accept_in_saved {
+                    let destination = Destination::Saved(saved.id);
+                    let folder = destination_folder(destination, None, &world.inventory, &world.accept_in_saved);
+                    if folder.is_some() {
+                        options.push((destination, folder, saved.name.clone()));
+                    }
+                }
+                // the checkbox and the last choice made on a card, kept for the
+                // next offers; this card starts on the object's folder when
+                // auto-select is on (the editor's choice), until the user picks
+                let key = egui::Id::unique("offer_accept_in_choice");
+                let (mut on, remembered) = ui
+                    .ctx()
+                    .data_mut(|d| d.get_persisted::<(bool, Destination)>(key))
+                    .unwrap_or((true, Destination::Default));
+                let start = n
+                    .accept_choice
+                    .unwrap_or_else(|| offer_start(remembered, world.accept_in_auto_select, object.is_some()));
+                let mut choice = start;
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.add_space(indent);
@@ -857,13 +878,28 @@ pub(super) fn card(
                                 }
                             });
                     });
+                    // the wrench: the editor of the saved destinations
+                    if super::widgets::icon_button(ui, p, "settings-filled", aurora_i18n::tr!("accept-in-wrench-tip"), true) {
+                        ui.ctx()
+                            .data_mut(|d| d.insert_temp(egui::Id::unique("accept_in_open_editor"), true));
+                    }
                 });
-                ui.ctx().data_mut(|d| d.insert_persisted(key, (on, choice)));
-                n.accept_in = if on {
-                    options.iter().find(|option| option.0 == choice).and_then(|option| option.1)
+                // a pick is this card's from now on, and the next cards' start
+                if choice != start {
+                    n.accept_choice = Some(choice);
+                }
+                let kept = if choice != start { choice } else { remembered };
+                ui.ctx().data_mut(|d| d.insert_persisted(key, (on, kept)));
+                let picked = if on {
+                    options.iter().find(|option| option.0 == choice)
                 } else {
                     None
                 };
+                n.accept_in = picked.and_then(|option| option.1);
+                n.accept_saved = picked.and_then(|option| match option.0 {
+                    Destination::Saved(entry) => Some(entry),
+                    _ => None,
+                });
             }
             if !buttons.is_empty() {
                 // Indent the whole wrap column: a leading `add_space` inside
@@ -1310,6 +1346,8 @@ mod tests {
             name_links: Vec::new(),
             read: false,
             accept_in: None,
+            accept_saved: None,
+            accept_choice: None,
             data,
             text: String::new(),
             transient: false,

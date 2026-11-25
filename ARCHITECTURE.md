@@ -153,7 +153,12 @@ commit and cancellation state; the native input bridge is unchanged (#2608).
 Object contents item menus share `ui/object_actions::task_copy_request` and
 `app/contents_copy.rs` with the Open window's full-copy button. The window's
 "Accept in" choice (Catznip) is `world/contents_destination.rs`: the rule that
-picks the folder the new folder goes into, with its fallbacks. The editor
+picks the folder the new folder goes into, with its fallbacks, the saved
+destinations and their subfolder tokens. `world/folder_path.rs` makes a
+destination's subfolder levels one request at a time. `accept_in_saved.rs`
+keeps each account's destinations and auto-select choice in the account's folder.
+`ui/accept_in_editor.rs` is the wrench's window and `ui/accept_in_picker.rs` the
+Browse picker. The editor
 queues one `build::ui::Request::CopyContents` for its selection; both editor
 layouts and the Open item menu create one folder named after the object,
 retain the shared no-copy move warning and observe actual item arrivals.

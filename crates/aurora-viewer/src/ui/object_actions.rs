@@ -385,6 +385,15 @@ fn accept_in_options(world: &World, source: Option<uuid::Uuid>) -> Vec<(crate::w
     if let Some(folder) = parent(Destination::ReceivedItems, None, inv) {
         out.push((Destination::ReceivedItems, name(folder)));
     }
+    // this account's saved destinations, by their friendly names, after the rest
+    // (Catznip's refreshFolders), those whose folder is usable now
+    for saved in &world.accept_in_saved {
+        let destination = Destination::Saved(saved.id);
+        let usable = crate::world::contents_destination::destination_folder(destination, None, inv, &world.accept_in_saved);
+        if usable.is_some() {
+            out.push((destination, saved.name.clone()));
+        }
+    }
     out
 }
 
@@ -467,6 +476,11 @@ pub fn show_contents(
                             }
                         });
                 });
+                // the wrench: the editor of the saved destinations
+                if super::widgets::icon_button(ui, p, "settings-filled", aurora_i18n::tr!("accept-in-wrench-tip"), true) {
+                    ui.ctx()
+                        .data_mut(|d| d.insert_temp(egui::Id::unique("accept_in_open_editor"), true));
+                }
             });
             ui.horizontal(|ui| {
                 let ready = copyable.is_ok();

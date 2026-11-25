@@ -45,6 +45,7 @@ pub mod experience_log;
 pub mod experiences;
 pub mod favorites;
 pub mod flying_at_exit;
+pub mod folder_path;
 mod friend_join;
 pub mod friends_only;
 pub mod group_ban_all;
@@ -475,6 +476,13 @@ pub enum LocalAssetRequest {
     Upload(Uuid),
 }
 
+/// An offer's walk down the subfolder path of its saved destination.
+pub struct OfferWalk {
+    /// The notification of the offer.
+    pub id: u64,
+    pub path: folder_path::PathWalk,
+}
+
 pub struct World {
     /// mScreen's Y scale (LLVOAvatarSelf::updateCharacter).
     pub hud_aspect: f32,
@@ -495,6 +503,15 @@ pub struct World {
     pub notification_history: notification_history::History,
     pub login: Option<Arc<LoginResponse>>,
     pub agent_id: Uuid,
+    /// This account's saved "Accept in" destinations, read at login
+    /// (`accept_in_saved`).
+    pub accept_in_saved: Vec<contents_destination::Saved>,
+    /// The editor's auto-select choice: an offer starts on its object's folder
+    /// when this is on, on the usual place when it is off.
+    pub accept_in_auto_select: bool,
+    /// The subfolder levels of offers being accepted into a saved destination,
+    /// by the request of the level in progress.
+    pub offer_walks: HashMap<Uuid, OfferWalk>,
     pub regions: HashMap<RegionHandle, Region>,
     pub main_region: Option<RegionHandle>,
     pub objects: ObjectStore,
@@ -1078,6 +1095,9 @@ impl World {
             nearby_typing: HashSet::new(),
             login: None,
             agent_id: Uuid::nil(),
+            accept_in_saved: Vec::new(),
+            accept_in_auto_select: true,
+            offer_walks: HashMap::new(),
             regions: HashMap::new(),
             main_region: None,
             objects: ObjectStore::default(),
@@ -6115,8 +6135,142 @@ impl World {
         self.ui_sounds.push(UiSound::QuestionExperience);
     }
 
+    /// An offer accepted into a saved destination with a subfolder path: the
+    /// missing levels are made first (one request at a time), and its accept
+    /// follows; a reply comes to `offer_walk_result`. When every level exists
+    /// already, the offer's folder becomes the last one and the accept goes on
+    /// at once (None is returned).
+    fn start_offer_walk(&mut self, id: u64) -> Option<aurora_net::NetCommand> {
+        let (folder, saved) = self
+            .notifications
+            .list
+            .iter()
+            .find(|n| n.id == id)
+            .and_then(|n| Some((n.accept_in?, n.accept_saved?)))?;
+        let entry = contents_destination::find_saved(&self.accept_in_saved, saved)?.clone();
+        if entry.subfolder.trim().is_empty() {
+            return None;
+        }
+        let today = chrono::Local::now().date_naive();
+        let region = self.region_name();
+        let path = contents_destination::expand(&entry.subfolder, today, &region);
+        let levels = match contents_destination::subfolder_parts(&path) {
+            Some(levels) if !levels.is_empty() => levels,
+            // deeper than the limit (the editor refuses it): the saved folder itself
+            _ => return None,
+        };
+        let mut walk = folder_path::PathWalk::new(folder, levels);
+        match walk.next_level(&self.inventory) {
+            Ok(Some(change)) => {
+                let request = Uuid::new_v4();
+                self.offer_walks.insert(request, OfferWalk { id, path: walk });
+                Some(aurora_net::NetCommand::EditInventory { request, change })
+            }
+            Ok(None) => {
+                // every level is there already: the accept files in the last one
+                let last = walk.folder();
+                if let Some(n) = self.notifications.list.iter_mut().find(|n| n.id == id) {
+                    n.accept_in = Some(last);
+                }
+                None
+            }
+            Err(reason) => {
+                log::warn!("offer folder path refused, the saved folder is used: {reason}");
+                None
+            }
+        }
+    }
+
+    /// The offers whose subfolder level has waited too long for its reply: each
+    /// is accepted into the usual place, so that the item is not left waiting.
+    pub fn expired_offer_walks(&mut self, now: std::time::Instant) -> Vec<aurora_net::NetCommand> {
+        let expired: Vec<Uuid> = self
+            .offer_walks
+            .iter()
+            .filter(|(_, walk)| walk.path.timed_out(now))
+            .map(|(request, _)| *request)
+            .collect();
+        let mut out = Vec::new();
+        for request in expired {
+            out.extend(self.offer_walk_result(request, Err("no reply for the folder".into())));
+        }
+        out
+    }
+
+    /// The reply of one subfolder level of an offer: the walk goes on, or, once
+    /// every level is there, the offer is accepted into the last one. A level
+    /// that is not made gives the usual place instead.
+    pub fn offer_walk_result(
+        &mut self,
+        request: Uuid,
+        result: Result<aurora_net::inventory::operations::Reply, String>,
+    ) -> Vec<aurora_net::NetCommand> {
+        let Some(mut walk) = self.offer_walks.remove(&request) else {
+            return Vec::new();
+        };
+        let made = match result {
+            Ok(reply) => {
+                let folder = walk.path.asked().map(|asked| reply.created.get(&asked).copied().unwrap_or(asked));
+                self.inventory.remove(&reply.removed);
+                self.inventory.apply(reply.contents);
+                self.inventory.created_folders(reply.folders);
+                walk.path.made(folder)
+            }
+            Err(reason) => Err(reason),
+        };
+        let next = made.and_then(|()| walk.path.next_level(&self.inventory));
+        match next {
+            Ok(Some(change)) => {
+                let next_request = Uuid::new_v4();
+                self.offer_walks.insert(next_request, walk);
+                vec![aurora_net::NetCommand::EditInventory {
+                    request: next_request,
+                    change,
+                }]
+            }
+            Ok(None) => {
+                // every level is there: the offer goes into the last one
+                let folder = walk.path.folder();
+                if let Some(n) = self.notifications.list.iter_mut().find(|n| n.id == walk.id) {
+                    n.accept_in = Some(folder);
+                    n.accept_saved = None;
+                }
+                self.respond_notification(walk.id, notifications::Response::Accept).0
+            }
+            Err(reason) => {
+                log::warn!("offer folder path not made: {reason}");
+                if let Some(n) = self.notifications.list.iter_mut().find(|n| n.id == walk.id) {
+                    n.accept_in = None;
+                    n.accept_saved = None;
+                }
+                self.respond_notification(walk.id, notifications::Response::Accept).0
+            }
+        }
+    }
+
+    /// Whether a folder reply belongs to an offer's subfolder walk.
+    pub fn owns_offer_walk(&self, request: Uuid) -> bool {
+        self.offer_walks.contains_key(&request)
+    }
+
     /// Answer a notification: messages to send and a URL to open.
     pub fn respond_notification(&mut self, id: u64, r: notifications::Response) -> (Vec<aurora_net::NetCommand>, Option<String>) {
+        // an offer whose subfolder levels are on their way: a second Accept
+        // waits for them (the walk accepts it), a refusal ends the walk
+        if self.offer_walks.values().any(|walk| walk.id == id) {
+            match r {
+                notifications::Response::Accept => return (Vec::new(), None),
+                notifications::Response::Decline | notifications::Response::Block => {
+                    self.offer_walks.retain(|_, walk| walk.id != id);
+                }
+                _ => {}
+            }
+        }
+        if matches!(r, notifications::Response::Accept)
+            && let Some(command) = self.start_offer_walk(id)
+        {
+            return (vec![command], None);
+        }
         let data = self.notifications.list.iter().find(|n| n.id == id).map(|n| n.data.clone());
         if let Some(notifications::Data::RlvaQuery { from, exceptions }) = data {
             self.rlva_answer_im_query(from, exceptions, &r);
@@ -8904,6 +9058,107 @@ mod motion_tests {
         let mut bucket = vec![asset_type];
         bucket.extend_from_slice(object.as_bytes());
         bucket
+    }
+
+    /// A resident's offer chosen into a saved destination with a subfolder:
+    /// its accept waits for the subfolder, and the folder made is filed in.
+    /// Returns the world, the offer, the walk's request and the folder asked.
+    fn offer_walking_to_a_subfolder() -> (World, u64, Uuid, Uuid) {
+        use aurora_net::NetCommand;
+        use aurora_net::inventory::operations::Operation;
+        use notifications::{Response, im};
+        let (mut world, _, _) = fixture();
+        let me = world.agent_id;
+        inventory::demo::seed(&mut world.inventory, me);
+        let root = world.inventory.root;
+        let entry = Uuid::from_u128(0xACC);
+        world.accept_in_saved = vec![contents_destination::Saved {
+            id: entry,
+            name: "Trips".into(),
+            folder: root,
+            subfolder: "Accept in walk".into(),
+        }];
+        world.apply(inventory_offer(
+            &world,
+            im::INVENTORY_OFFERED,
+            agent_bucket(5, Uuid::from_u128(0xFEED)),
+        ));
+        let id = world.notifications.list.last().expect("offer").id;
+        let n = world.notifications.list.iter_mut().find(|n| n.id == id).expect("listed");
+        n.accept_in = Some(root);
+        n.accept_saved = Some(entry);
+        let (cmds, _) = world.respond_notification(id, Response::Accept);
+        let (request, asked) = match &cmds[..] {
+            [NetCommand::EditInventory { request, change }] => match change.operations.first() {
+                Some(Operation::Folder { id, parent, .. }) if *parent == root => (*request, *id),
+                other => panic!("not the subfolder: {other:?}"),
+            },
+            other => panic!("the subfolder first, not the accept: {other:?}"),
+        };
+        (world, id, request, asked)
+    }
+
+    fn folder_made(asked: Uuid, made: Uuid) -> aurora_net::inventory::operations::Reply {
+        aurora_net::inventory::operations::Reply {
+            contents: Vec::new(),
+            folders: Vec::new(),
+            moves_queued: false,
+            refresh: Vec::new(),
+            copies: Vec::new(),
+            removed: Vec::new(),
+            created: HashMap::from([(asked, made)]),
+        }
+    }
+
+    #[test]
+    fn an_offer_into_a_subfolder_is_accepted_once_the_folder_is_made() {
+        use aurora_net::NetCommand;
+        use notifications::{Response, im};
+        let (mut world, id, request, asked) = offer_walking_to_a_subfolder();
+        assert!(
+            world.respond_notification(id, Response::Accept).0.is_empty(),
+            "a second Accept waits for the folder"
+        );
+        let made = Uuid::from_u128(0xF01D);
+        let cmds = world.offer_walk_result(request, Ok(folder_made(asked, made)));
+        assert!(
+            matches!(&cmds[..], [NetCommand::SendImDialog { dialog: im::INVENTORY_ACCEPTED, bucket, .. }] if bucket[..] == made.as_bytes()[..]),
+            "{cmds:?}"
+        );
+        assert!(!world.owns_offer_walk(request));
+    }
+
+    #[test]
+    fn a_declined_offer_ends_its_subfolder_walk() {
+        use notifications::Response;
+        let (mut world, id, request, asked) = offer_walking_to_a_subfolder();
+        world.respond_notification(id, Response::Decline);
+        assert!(!world.owns_offer_walk(request));
+        assert!(
+            world.offer_walk_result(request, Ok(folder_made(asked, Uuid::new_v4()))).is_empty(),
+            "no accept after the decline"
+        );
+    }
+
+    #[test]
+    fn an_offer_whose_subfolder_never_answers_goes_to_the_usual_place() {
+        use aurora_net::NetCommand;
+        use notifications::im;
+        let (mut world, _, request, _) = offer_walking_to_a_subfolder();
+        assert!(world.expired_offer_walks(std::time::Instant::now()).is_empty(), "still waiting");
+        let later = std::time::Instant::now() + folder_path::LEVEL_TIMEOUT;
+        let cmds = world.expired_offer_walks(later);
+        assert!(
+            matches!(
+                &cmds[..],
+                [NetCommand::SendImDialog {
+                    dialog: im::INVENTORY_ACCEPTED,
+                    ..
+                }]
+            ),
+            "{cmds:?}"
+        );
+        assert!(!world.owns_offer_walk(request));
     }
 
     #[test]
