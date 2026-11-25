@@ -636,8 +636,6 @@ pub struct Notifications {
     /// disturb its bell is paused but everything still arrives in "To do";
     /// Firestorm's style drops the messages' entries then.
     pub aurora: bool,
-    /// The giving objects whose folder the app has been asked to read.
-    source_asked: HashSet<Uuid>,
     /// What became of the notifications that left the list (answered,
     /// declined…), for their history entry.
     outcomes: HashMap<u64, Outcome>,
@@ -707,11 +705,6 @@ impl Notifications {
                 offer.source_folder = Some(folder);
             }
         }
-    }
-
-    /// Whether the app is to read this object's folder now (once per object).
-    pub fn first_source_request(&mut self, object: Uuid) -> bool {
-        self.source_asked.insert(object)
     }
 
     /// The folder an object's offers came from ("Accept in": the object's own
