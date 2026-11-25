@@ -53,7 +53,9 @@ mod dof;
 mod editor_sync;
 mod external_url;
 mod fast_hash;
+// This fork's differences from the official viewer (FORK.md).
 mod film_sound;
+mod fork;
 mod frame_par;
 mod frame_profile;
 mod game_control;
