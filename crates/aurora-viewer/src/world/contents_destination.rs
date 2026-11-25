@@ -111,15 +111,18 @@ pub fn object_folder(source: Option<Uuid>, inv: &Inventory) -> Option<Uuid> {
     usable(inv, folder).then_some(folder)
 }
 
-/// A folder a new folder may be created in: it exists, and it is not in the
-/// Library, the Trash or the Current Outfit. Received Items and its folders
-/// are allowed, as Catznip allows them (the Legacy Viewer files received
-/// items there). Stricter than Catznip on the outfit tree.
+/// A folder a new folder may be created in: the inventory's own destination
+/// rule (`actions::destination`: not in the Library, the Trash, the Current
+/// Outfit or My Outfits), and Received Items with its folders, which that rule
+/// leaves out but Catznip allows (the Legacy Viewer files received items
+/// there). Stricter than Catznip on the outfit trees: a folder of the copy, or
+/// an offer, inside an outfit would be read as part of the outfit.
 pub fn usable(inv: &Inventory, folder: Uuid) -> bool {
-    inv.folders.contains_key(&folder)
-        && !actions::library(inv, folder)
-        && !actions::in_type(inv, folder, 14)
-        && !actions::in_type(inv, folder, 46)
+    actions::destination(inv, folder)
+        || (actions::in_type(inv, folder, FT_INBOX)
+            && inv.folders.contains_key(&folder)
+            && !actions::library(inv, folder)
+            && !actions::in_type(inv, folder, 14))
 }
 
 /// A destination saved in the "Accept in" list (Catznip's
@@ -213,6 +216,37 @@ mod tests {
             items: Vec::new(),
             state: crate::world::inventory::FetchState::Fetched,
             library,
+        }
+    }
+
+    /// The inventory's destination rule, plus Received Items: an ordinary
+    /// folder and Received Items (with its folders) are usable; My Outfits, an
+    /// outfit in it, the Current Outfit, the Trash and the Library are not.
+    #[test]
+    fn a_usable_folder_follows_the_inventory_rule_and_allows_received_items() {
+        let mut inv = inventory();
+        // My Outfits (6, type 48) holding an outfit (7), the Current Outfit
+        // (8, type 46), a folder in Received Items (9), a folder in My Item (10)
+        for (n, parent, kind) in [(6, id(1), 48), (7, id(6), -1), (8, id(1), 46), (9, id(3), -1), (10, id(2), -1)] {
+            inv.folders.insert(id(n), folder(n, parent, kind, false));
+        }
+        inv.folders.get_mut(&id(1)).expect("root").children.extend([id(6), id(8)]);
+        inv.folders.get_mut(&id(6)).expect("My Outfits").children.push(id(7));
+        inv.folders.get_mut(&id(3)).expect("Received Items").children.push(id(9));
+        inv.folders.get_mut(&id(2)).expect("My Item").children.push(id(10));
+        for (n, expected, what) in [
+            (2, true, "an ordinary folder"),
+            (10, true, "a folder inside it"),
+            (3, true, "Received Items"),
+            (9, true, "a folder in Received Items"),
+            (6, false, "My Outfits"),
+            (7, false, "an outfit in My Outfits"),
+            (8, false, "the Current Outfit"),
+            (4, false, "the Trash"),
+            (5, false, "the Library"),
+            (99, false, "a folder that does not exist"),
+        ] {
+            assert_eq!(usable(&inv, id(n)), expected, "{what}");
         }
     }
 
