@@ -165,6 +165,11 @@ retain the shared no-copy move warning and observe actual item arrivals.
 Only selected items are copied; drag and drop keeps its explicit destination.
 This menu command is Aurora's addition to LLFloaterOpenObject's folder copy.
 
+`fork.rs` holds what this fork's builds do differently from the official
+viewer (crash reports kept on the PC; the updater stays off by itself for a
+`vX.Y.Z-fork.N` version). FORK.md at the repository root describes the fork,
+its versions and how an upstream release is merged in.
+
 `aurora-media/src/file_picker.rs` handles CEF's blocking file requests with the
 same `rfd` native picker as the viewer, on a worker. The plugin host polls its
 per-instance reply channel without blocking frames; single/multiple selections

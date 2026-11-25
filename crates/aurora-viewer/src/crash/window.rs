@@ -117,7 +117,8 @@ struct Sending {
 impl Sending {
     fn new(dir: &Path, record: &super::Record) -> Self {
         let mut github = super::github::Session::new(record.demo);
-        let mut mode = record.crash_reports;
+        // a fork build keeps its reports on this PC (fork.rs)
+        let mut mode = crate::fork::crash_reports(record.crash_reports);
         let mut preview = false;
         let mut sent = super::read_limited(&dir.join("sent.txt"), 32)
             .ok()
@@ -743,14 +744,14 @@ mod tests {
             serde_json::to_string(&crate::theme::Theme::default()).unwrap()
         ))
         .unwrap();
+        // the mode this build gives the "Always" setting (a fork build keeps
+        // its reports on the PC, fork.rs)
+        let mode = crate::fork::crash_reports(CrashReports::Always);
         let fresh = Sending::new(&dir, &record);
-        assert_eq!((fresh.sent, fresh.preview), (None, true));
+        assert_eq!((fresh.sent, fresh.preview), (None, opens_on_preview(mode, false)));
         std::fs::write(dir.join("sent.txt"), "812").unwrap();
         let sending = Sending::new(&dir, &record);
-        assert_eq!(
-            (sending.sent, sending.mode, sending.preview),
-            (Some(812), CrashReports::Always, false)
-        );
+        assert_eq!((sending.sent, sending.mode, sending.preview), (Some(812), mode, false));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
