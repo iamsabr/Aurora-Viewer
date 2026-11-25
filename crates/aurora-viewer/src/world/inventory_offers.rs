@@ -36,6 +36,11 @@ pub struct TaskOffer {
     pub item_name: String,
     pub from_group: bool,
     pub own_object: bool,
+    /// The giving object (the IM's id), for its folder ("Accept in").
+    pub object: Uuid,
+    /// The folder the giving object came from, once the app has read it
+    /// (its properties, or the worn item's folder). None until then.
+    pub source_folder: Option<Uuid>,
 }
 
 impl TaskOffer {
@@ -261,6 +266,10 @@ impl World {
             item_name: item.to_owned(),
             from_group: im.from_group,
             own_object: im.from_agent_id == self.agent_id,
+            // the IM's id is the object that gave the item (the session id, as
+            // the packet's id is stored there)
+            object: im.session_id,
+            source_folder: None,
         };
         if !im.from_agent_id.is_nil() && !offer.own_object {
             if offer.from_group {

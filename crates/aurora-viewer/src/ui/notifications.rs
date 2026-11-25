@@ -793,6 +793,78 @@ pub(super) fn card(
                     });
                 }
             }
+            // "Accept in" of an offer (Catznip's offer folder choice): a
+            // checkbox and a drop-down, as on the Open window. An item, a
+            // folder or an object goes to the chosen folder, where the object's
+            // own folder arrives as the server sends it.
+            if matches!(n.data, Data::Inventory { .. }) {
+                // the giving object's folder, offered as "[Object: …]" once it
+                // is known and usable (Catznip's "[originating: …]" entry)
+                let source = match &n.data {
+                    Data::Inventory {
+                        task_offer: Some(offer), ..
+                    } => offer.source_folder,
+                    _ => None,
+                };
+                let folder_name = |folder: uuid::Uuid| {
+                    world
+                        .inventory
+                        .folders
+                        .get(&folder)
+                        .map(|f| f.info.name.clone())
+                        .unwrap_or_default()
+                };
+                let object = crate::world::contents_destination::object_folder(source, &world.inventory);
+                let received = crate::world::contents_destination::parent(
+                    crate::world::contents_destination::Destination::ReceivedItems,
+                    None,
+                    &world.inventory,
+                );
+                // (the choice's value, the folder it files in, its label)
+                let mut options: Vec<(u8, Option<uuid::Uuid>, String)> =
+                    vec![(0, None, aurora_i18n::tr!("contents-accept-in-default").to_owned())];
+                if let Some(folder) = object {
+                    options.push((
+                        1,
+                        Some(folder),
+                        aurora_i18n::tr!("contents-accept-in-object", name = folder_name(folder)).to_owned(),
+                    ));
+                }
+                if let Some(folder) = received {
+                    options.push((2, Some(folder), folder_name(folder)));
+                }
+                // one choice for every offer, kept for the next ones: checked and
+                // the object's folder to begin with (the value 1)
+                let key = egui::Id::unique("offer_accept_in_last");
+                let (mut on, mut choice) = ui.ctx().data_mut(|d| d.get_persisted::<(bool, u8)>(key)).unwrap_or((true, 1));
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(indent);
+                    super::widgets::checkbox(ui, p, &mut on, aurora_i18n::tr!("contents-accept-in"))
+                        .on_hover_text(aurora_i18n::tr!("contents-accept-in-tip"));
+                    let shown = options
+                        .iter()
+                        .find(|option| option.0 == choice)
+                        .or(options.first())
+                        .map(|option| option.2.clone())
+                        .unwrap_or_default();
+                    ui.add_enabled_ui(on && options.len() > 1, |ui| {
+                        egui::ComboBox::from_id_salt(("offer_accept_in_list", n.id))
+                            .selected_text(shown)
+                            .show_ui(ui, |ui| {
+                                for (value, _, label) in &options {
+                                    ui.selectable_value(&mut choice, *value, label.as_str());
+                                }
+                            });
+                    });
+                });
+                ui.ctx().data_mut(|d| d.insert_persisted(key, (on, choice)));
+                n.accept_in = if on {
+                    options.iter().find(|option| option.0 == choice).and_then(|option| option.1)
+                } else {
+                    None
+                };
+            }
             if !buttons.is_empty() {
                 // Indent the whole wrap column: a leading `add_space` inside
                 // `horizontal_wrapped` only shifts the first row, so a long
@@ -1237,6 +1309,7 @@ mod tests {
             body: String::new(),
             name_links: Vec::new(),
             read: false,
+            accept_in: None,
             data,
             text: String::new(),
             transient: false,
@@ -1901,6 +1974,8 @@ mod tests {
                     item_name: "Note de bienvenue".into(),
                     from_group: false,
                     own_object: false,
+                    object: Uuid::nil(),
+                    source_folder: None,
                 }),
             },
         );
@@ -1994,6 +2069,8 @@ mod tests {
                             item_name: "Welcome note".into(),
                             from_group: false,
                             own_object,
+                            object: Uuid::nil(),
+                            source_folder: None,
                         }),
                     },
                 );
