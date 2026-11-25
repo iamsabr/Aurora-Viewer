@@ -1056,6 +1056,8 @@ pub struct App {
     /// The session's account whose favourites the login screen gets
     /// (app/login_favorites.rs).
     login_favorites: login_favorites::Session,
+    /// The "Accept in" destinations editor (the wrench's window).
+    accept_in_editor: ui::accept_in_editor::Editor,
     /// The account whose Show Friends Only choice the world carries
     /// (app/derender.rs).
     friends_only_account: uuid::Uuid,
@@ -2306,6 +2308,7 @@ impl App {
             attention: Default::default(),
             reconnect_place: None,
             login_favorites: Default::default(),
+            accept_in_editor: Default::default(),
             friends_only_account: uuid::Uuid::nil(),
             external: external_links::ExternalLinks::start(),
             demo_link_health: link_health::LinkHealthDemo::from_env(),
@@ -3765,6 +3768,9 @@ impl App {
         // must not save them into its sets
         self.contacts_ui = Default::default();
         self.contents_copies = Default::default();
+        // the "Accept in" editor holds the last account's destinations: a relog
+        // as another account must not save them into its file
+        self.accept_in_editor = Default::default();
         self.texture_library.reset();
         self.library_drag = Default::default();
         self.library_demo_seeded = false;
@@ -4185,6 +4191,17 @@ impl App {
                     }
                     Err(reason) => log::warn!("landmark change not saved: {reason}"),
                 }
+                return;
+            }
+            // a subfolder level of an offer's "Accept in" destination
+            if self.world.owns_offer_walk(request) {
+                for command in self.world.offer_walk_result(request, result) {
+                    self.send(command);
+                }
+                return;
+            }
+            if self.contents_copies.owns_walk(request) {
+                self.contents_copy_walk_result(request, result);
                 return;
             }
             if self.contents_copies.owns(request) {
@@ -4626,6 +4643,10 @@ impl App {
                         .open(crate::settings::config_dir().join(crate::login_favorites::FILE));
                 }
                 self.login_favorites.session_started(&self.settings, self.demo);
+                // this account's saved "Accept in" destinations (Catznip's per-account list)
+                let stored = crate::accept_in_saved::load(self.world.agent_id);
+                self.world.accept_in_saved = stored.list;
+                self.world.accept_in_auto_select = stored.auto_select;
                 // the demo's teleport history: several days, never saved
                 if self.demo {
                     let mut visits = crate::demo::place::history();
@@ -20725,6 +20746,34 @@ impl App {
                 self.experiences_ui.show(&ctx, &p, &mut self.world, &mut self.panels.experiences);
                 for action in contents_actions {
                     self.apply_contents_action(action);
+                }
+                // the "Accept in" editor, opened by the wrench of a row
+                if ctx
+                    .data_mut(|d| d.remove_temp::<bool>(egui::Id::unique("accept_in_open_editor")))
+                    .unwrap_or(false)
+                    // a second click keeps the edits in progress
+                    && !self.accept_in_editor.open
+                {
+                    self.accept_in_editor
+                        .open(&self.world.accept_in_saved, self.world.accept_in_auto_select);
+                }
+                if self.accept_in_editor.open {
+                    match ui::accept_in_editor::show(&ctx, &p, &self.world.inventory, &mut self.accept_in_editor) {
+                        ui::accept_in_editor::Action::Save(list, auto_select) => {
+                            let stored = crate::accept_in_saved::Stored {
+                                auto_select,
+                                list: list.clone(),
+                            };
+                            if let Err(err) = crate::accept_in_saved::save(self.world.agent_id, &stored) {
+                                log::warn!("accept-in destinations not saved: {err}");
+                            }
+                            self.world.accept_in_saved = list;
+                            self.world.accept_in_auto_select = auto_select;
+                            self.accept_in_editor.open = false;
+                        }
+                        ui::accept_in_editor::Action::Close => self.accept_in_editor.open = false,
+                        ui::accept_in_editor::Action::None => {}
+                    }
                 }
                 let accept_in = self.settings.inventory.contents_accept_in;
                 let mut accept_in_now = accept_in;

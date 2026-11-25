@@ -20,6 +20,7 @@ mod blender_live;
 // `crash/report.rs`): to bring it back, uncomment every line marked "Bug
 // report form (disabled, see main.rs)".
 // mod bug_report;
+mod accept_in_saved;
 mod build;
 mod cache;
 mod cache_key;

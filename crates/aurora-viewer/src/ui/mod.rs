@@ -22,6 +22,8 @@ pub mod sound_explorer;
 pub mod voice_controls;
 // Bug report form (disabled, see main.rs):
 // pub mod bug_report;
+pub mod accept_in_editor;
+pub mod accept_in_picker;
 pub mod beacons;
 pub mod beams;
 pub mod buy_currency;

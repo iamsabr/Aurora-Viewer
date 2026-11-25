@@ -370,6 +370,12 @@ pub struct Notification {
     /// "Accept in" of an offer (Catznip's offer folder choice): the folder
     /// its accept files an item or a folder in. None: the usual place.
     pub accept_in: Option<Uuid>,
+    /// The saved destination the choice is (the entry's id), whose subfolder
+    /// levels are made before the accept.
+    pub accept_saved: Option<Uuid>,
+    /// The choice picked on this offer's card; None until the user picks one,
+    /// while the card follows `contents_destination::offer_start`.
+    pub accept_choice: Option<super::contents_destination::Destination>,
     pub data: Data,
     /// llTextBox reply being typed.
     pub text: String,
@@ -837,6 +843,8 @@ impl Notifications {
             name_links: Vec::new(),
             read: false,
             accept_in: None,
+            accept_saved: None,
+            accept_choice: None,
             data,
             text: String::new(),
             transient: false,
