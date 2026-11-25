@@ -508,6 +508,122 @@ fn hidden_behind(origin: Vec3, dir: Vec3, point: Vec3, center: Vec3, radius: f32
     radius > 0.0 && off_ray <= radius && (point - origin).dot(dir) < along - radius
 }
 
+impl App {
+    /// The folder of each object that gave an offer ("Accept in": offered as
+    /// `[Object: …]`). Its folder is read from its full properties, which the
+    /// Open window reads the same way; a worn object takes its worn item's
+    /// folder. The first read asks the simulator for the properties.
+    pub(super) fn read_offer_sources(&mut self) {
+        for name in self.world.notifications.own_offer_names_wanting_source() {
+            self.read_own_offer_source(&name);
+        }
+        for object in self.world.notifications.offer_objects_wanting_source() {
+            let folder = self
+                .build
+                .props
+                .get(&object)
+                .or_else(|| self.interactions.props.get(&object))
+                .filter(|props| props.full)
+                .and_then(|props| {
+                    let rezzed = (!props.folder_id.is_nil()).then_some(props.folder_id);
+                    let worn = (!props.item_id.is_nil())
+                        .then(|| self.world.inventory.items.get(&props.item_id).map(|item| item.parent))
+                        .flatten()
+                        .filter(|id| !id.is_nil());
+                    rezzed.or(worn)
+                });
+            if let Some(folder) = folder {
+                log::info!("offer source: object {object} is in folder {folder}");
+                self.world.notifications.set_offer_source(object, folder);
+                continue;
+            }
+            if !self.world.notifications.first_source_request(object) {
+                continue;
+            }
+            let props = self.build.props.get(&object).or_else(|| self.interactions.props.get(&object));
+            log::info!(
+                "offer source: object {object} in the world: {}, properties: {}",
+                self.world.objects.index_of_uuid(&object).is_some(),
+                props.map_or("none".to_owned(), |p| format!(
+                    "full {}, folder {}, item {}",
+                    p.full, p.folder_id, p.item_id
+                ))
+            );
+            let key = self
+                .world
+                .objects
+                .index_of_uuid(&object)
+                .and_then(|i| self.world.objects.get(i))
+                .map(|o| o.key);
+            for command in key
+                .map(|key| self.build.prim_properties_query(&self.world, key))
+                .unwrap_or_default()
+            {
+                self.send(command);
+            }
+        }
+    }
+}
+
+impl App {
+    /// The folder of an offer from one of our own objects ("Accept in"), read
+    /// as Catznip's getFolderFromObject reads our objects: an attachment's
+    /// worn item's folder, a rezzed object's folder when it is selected. The
+    /// first one that gives a folder is used.
+    fn read_own_offer_source(&mut self, name: &str) {
+        let agent = self.world.agent_id;
+        let mut found = None;
+        let mut ask = Vec::new();
+        for (_, object) in self.world.objects.iter() {
+            let (key, attachment) = (object.key, object.is_attachment());
+            let rezzed_selected = !attachment && self.build.is_selected(&key);
+            if !attachment && !rezzed_selected {
+                continue;
+            }
+            let props = self
+                .build
+                .props
+                .get(&object.full_id)
+                .or_else(|| self.interactions.props.get(&object.full_id));
+            match props.filter(|props| props.full) {
+                Some(props) if props.owner_id == agent => {
+                    // the object must have the offer's name: the worn item's
+                    // (an attachment) or the object's (rezzed and selected)
+                    let folder = if attachment {
+                        self.world
+                            .inventory
+                            .items
+                            .get(&props.item_id)
+                            .filter(|item| item.name == name)
+                            .map(|item| item.parent)
+                    } else {
+                        (props.name == name).then_some(props.folder_id)
+                    };
+                    if let Some(folder) = folder.filter(|folder| !folder.is_nil()) {
+                        found = Some(folder);
+                        break;
+                    }
+                }
+                Some(_) => {}
+                None => ask.push((key, object.full_id)),
+            }
+        }
+        if let Some(folder) = found {
+            log::info!("offer source: our object {name} is in folder {folder}");
+            self.world.notifications.set_own_offer_source(name, folder);
+            return;
+        }
+        // a few at a time: a region can hold many objects that are not ours
+        for (key, full_id) in ask.into_iter().take(16) {
+            if self.world.notifications.first_source_request(full_id) {
+                for command in self.build.prim_properties_query(&self.world, key) {
+                    self.send(command);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

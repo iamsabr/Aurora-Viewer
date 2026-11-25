@@ -367,6 +367,9 @@ pub struct Notification {
     pub body: String,
     pub name_links: Vec<NameLink>,
     pub read: bool,
+    /// "Accept in" of an offer (Catznip's offer folder choice): the folder
+    /// its accept files an item or a folder in. None: the usual place.
+    pub accept_in: Option<Uuid>,
     pub data: Data,
     /// llTextBox reply being typed.
     pub text: String,
@@ -627,6 +630,8 @@ pub struct Notifications {
     /// disturb its bell is paused but everything still arrives in "To do";
     /// Firestorm's style drops the messages' entries then.
     pub aurora: bool,
+    /// The giving objects whose folder the app has been asked to read.
+    source_asked: HashSet<Uuid>,
     /// What became of the notifications that left the list (answered,
     /// declined…), for their history entry.
     outcomes: HashMap<u64, Outcome>,
@@ -646,6 +651,77 @@ pub struct Notifications {
 const MAX: usize = 100;
 
 impl Notifications {
+    /// The giving objects of the listed object offers whose folder is not
+    /// known yet, for the app to read.
+    pub fn offer_objects_wanting_source(&self) -> Vec<Uuid> {
+        let mut out: Vec<Uuid> = self
+            .list
+            .iter()
+            .filter_map(|n| match &n.data {
+                Data::Inventory {
+                    task_offer: Some(offer), ..
+                } if !offer.own_object && !offer.object.is_nil() && offer.source_folder.is_none() => Some(offer.object),
+                _ => None,
+            })
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The object names of our own offers that still have no folder: the
+    /// folder is found among our own objects of that name (Catznip's
+    /// getFolderFromObject, which compares the item's name with the offer's).
+    pub fn own_offer_names_wanting_source(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .list
+            .iter()
+            .filter_map(|n| match &n.data {
+                Data::Inventory {
+                    task_offer: Some(offer), ..
+                } if offer.own_object && offer.source_folder.is_none() => Some(offer.object_name.clone()),
+                _ => None,
+            })
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// The folder of our own object called `name`, for its offers that have none.
+    pub fn set_own_offer_source(&mut self, name: &str, folder: Uuid) {
+        for n in self.list.iter_mut() {
+            if let Data::Inventory {
+                task_offer: Some(offer), ..
+            } = &mut n.data
+                && offer.own_object
+                && offer.source_folder.is_none()
+                && offer.object_name == name
+            {
+                offer.source_folder = Some(folder);
+            }
+        }
+    }
+
+    /// Whether the app is to read this object's folder now (once per object).
+    pub fn first_source_request(&mut self, object: Uuid) -> bool {
+        self.source_asked.insert(object)
+    }
+
+    /// The folder an object's offers came from ("Accept in": the object's own
+    /// folder is offered as `[Object: …]`).
+    pub fn set_offer_source(&mut self, object: Uuid, folder: Uuid) {
+        for n in self.list.iter_mut() {
+            if let Data::Inventory {
+                task_offer: Some(offer), ..
+            } = &mut n.data
+                && offer.object == object
+            {
+                offer.source_folder = Some(folder);
+            }
+        }
+    }
+
     /// Refresh an active notification's presentation, including the entry
     /// snapshot used if it departs before the next history tick.
     pub fn update_body(&mut self, id: u64, body: String) {
@@ -760,6 +836,7 @@ impl Notifications {
             body: body.into(),
             name_links: Vec::new(),
             read: false,
+            accept_in: None,
             data,
             text: String::new(),
             transient: false,
@@ -1053,6 +1130,7 @@ impl Notifications {
             let folder = folder_for(a.asset_type as i8);
             return (vec![super::group_data::offer_answer(a.from, a.tx, Some(folder))], None);
         }
+        let chosen = self.list[pos].accept_in;
         let n = self.list.remove(pos);
         let outcome = outcome_of(&n, &r);
         // Automatic acceptance can answer in the frame that creates the
@@ -1119,7 +1197,12 @@ impl Notifications {
                 },
                 _,
             ) => {
-                let folder = if accept { folder_for(*asset_type) } else { Uuid::nil() };
+                // "Accept in" (Catznip): the chosen folder, for an item, a folder or an object
+                let folder = if accept {
+                    chosen.unwrap_or_else(|| folder_for(*asset_type))
+                } else {
+                    Uuid::nil()
+                };
                 out.push(inventory_answer(*from, *tx, *task, accept, folder));
             }
             (Data::Group { group, tx, offline, .. }, _) => out.push(group_answer(*group, *tx, *offline, accept)),
@@ -1480,6 +1563,75 @@ mod tests {
         let (cmds, _) = n.respond(id, Response::Accept, |t| if t == 6 { folder } else { Uuid::nil() }, Uuid::nil());
         assert!(
             matches!(&cmds[..], [NetCommand::SendImDialog { dialog: im::INVENTORY_ACCEPTED, bucket, .. }] if bucket[..] == folder.as_bytes()[..])
+        );
+    }
+
+    /// "Accept in": an item or folder offer is accepted into the chosen folder,
+    /// and an answer without a choice (or a decline) goes as before.
+    #[test]
+    fn an_offer_accepted_into_the_chosen_folder_names_it() {
+        let mut n = Notifications::default();
+        let (from, tx) = (Uuid::new_v4(), Uuid::new_v4());
+        let (chosen, usual) = (Uuid::new_v4(), Uuid::new_v4());
+        let offer = || Data::Inventory {
+            from,
+            tx,
+            asset_type: 6,
+            object: Uuid::nil(),
+            task: false,
+            task_offer: None,
+        };
+        let id = n.push(Kind::Inventory, "", "", offer());
+        n.list.iter_mut().find(|x| x.id == id).expect("listed").accept_in = Some(chosen);
+        let (cmds, _) = n.respond(id, Response::Accept, |_| usual, Uuid::nil());
+        assert!(
+            matches!(&cmds[..], [NetCommand::SendImDialog { dialog: im::INVENTORY_ACCEPTED, bucket, .. }] if bucket[..] == chosen.as_bytes()[..])
+        );
+        // the choice ends with the answer
+        let plain = n.push(Kind::Inventory, "", "", offer());
+        let (cmds, _) = n.respond(plain, Response::Accept, |_| usual, Uuid::nil());
+        assert!(
+            matches!(&cmds[..], [NetCommand::SendImDialog { dialog: im::INVENTORY_ACCEPTED, bucket, .. }] if bucket[..] == usual.as_bytes()[..])
+        );
+        // a choice set, then the offer declined: the decline names no folder
+        let declined = n.push(Kind::Inventory, "", "", offer());
+        n.list.iter_mut().find(|x| x.id == declined).expect("listed").accept_in = Some(chosen);
+        let (cmds, _) = n.respond(declined, Response::Decline, |_| usual, Uuid::nil());
+        assert!(!cmds.is_empty());
+    }
+
+    /// "Accept in" of an object's offer: it is accepted into the chosen folder
+    /// itself, where the box's folder comes in as the server sends it.
+    #[test]
+    fn an_object_offer_is_accepted_into_the_chosen_folder() {
+        use crate::world::inventory_offers::TaskOffer;
+        let mut n = Notifications::default();
+        let (from, tx, chosen, usual) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let id = n.push(
+            Kind::Inventory,
+            "Distributeur",
+            "",
+            Data::Inventory {
+                from,
+                tx,
+                asset_type: 6,
+                object: Uuid::nil(),
+                task: true,
+                task_offer: Some(TaskOffer {
+                    object_name: "Distributeur".into(),
+                    item_name: "Note".into(),
+                    from_group: false,
+                    own_object: false,
+                    object: Uuid::new_v4(),
+                    source_folder: None,
+                }),
+            },
+        );
+        n.list.iter_mut().find(|x| x.id == id).expect("listed").accept_in = Some(chosen);
+        let (cmds, _) = n.respond(id, Response::Accept, |_| usual, Uuid::nil());
+        assert!(
+            matches!(&cmds[..], [NetCommand::SendImDialog { bucket, .. }] if bucket[..] == chosen.as_bytes()[..]),
+            "{cmds:?}"
         );
     }
 

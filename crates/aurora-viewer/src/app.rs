@@ -20834,6 +20834,8 @@ impl App {
                     .filter(|_| self.demo)
                     .unwrap_or(self.settings.presence_position);
                 let classic_bars = self.bars_look().0;
+                // the folder of each object that gave an offer ("Accept in")
+                self.read_offer_sources();
                 let mut toast_env = ui::notifications::ToastEnv {
                     pics: &self.avatar_pics,
                     images: &self.ui_images,
