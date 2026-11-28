@@ -1204,7 +1204,7 @@ impl<'a> Floater<'a> {
             w = w.auto_sized().min_width(width).max_width(width);
         } else if minimized {
             w = w.fixed_size(Vec2::new(
-                minimized_width(expanded.x),
+                crate::fork::minimized_width(expanded.x, minimized_width(expanded.x)),
                 if self.framed_header.is_some() { 40.0 } else { 38.0 },
             ));
         } else if let Some(size) = opening.as_ref().and_then(|o| o.size).filter(|_| !self.auto_height) {

@@ -148,7 +148,8 @@ fn title_double_click_collapses_and_restores_size_and_contents() {
         let title = f.title();
         let collapsed = f.double_click(title);
         assert!(collapsed.height() < 40.0, "{collapsed:?}");
-        assert!((collapsed.width() - MINIMIZED_W).abs() < 1.0, "{collapsed:?}");
+        // fork: the bar keeps the open width (`fork::minimized_width`)
+        assert!((collapsed.width() - expanded.width()).abs() < 1.0, "{expanded:?} -> {collapsed:?}");
         let bodies = f.bodies;
         f.show(vec![]);
         assert_eq!(f.bodies, bodies, "hidden contents must not run");
@@ -198,7 +199,8 @@ fn inspector_header_restores_geometry_and_preserves_hidden_contents() {
     let expanded = f.show(vec![]);
     let collapsed = f.double_click(f.title());
     assert!(collapsed.height() >= 40.0 && collapsed.height() < 50.0, "{collapsed:?}");
-    assert!((collapsed.width() - MINIMIZED_W).abs() < 1.0, "{collapsed:?}");
+    // fork: the bar keeps the open width (`fork::minimized_width`)
+    assert!((collapsed.width() - expanded.width()).abs() < 1.0, "{expanded:?} -> {collapsed:?}");
     let bodies = f.bodies;
     for _ in 0..40 {
         f.show(vec![]);

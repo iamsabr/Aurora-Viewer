@@ -12,6 +12,11 @@ pull requests, issues or crash reports.
   Items, or saved destination folders with dated and region subfolders
   (`world/contents_destination.rs`, `world/folder_path.rs`,
   `accept_in_saved.rs`, `ui/accept_in_editor.rs`, `ui/accept_in_picker.rs`).
+- **Minimized windows keep their width** (from Catznip's floater collapse): a
+  minimized window rolls up to its title bar in place at its full width, title
+  and buttons in full, instead of a short 200-pixel bar. Minimizing and
+  restoring otherwise work as before; there is no extra Collapse button
+  (`fork::minimized_width`).
 
 ## What a fork build does differently
 
