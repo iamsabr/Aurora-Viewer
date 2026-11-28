@@ -21,6 +21,19 @@ pub fn crash_reports(_setting: CrashReports) -> CrashReports {
     CrashReports::Never
 }
 
+/// The width of a minimized window in a fork build: the width it has open,
+/// so it rolls up to its title bar in place, title and buttons in full,
+/// instead of the official viewer's short bar (`official`, UIMinimizedWidth).
+/// Port of Catznip's floater collapse (`LLFloater::setMinimized` with
+/// `mCollapseOnMinimize`, indra/llui/llfloater.cpp, `[SL:KB] - Patch:
+/// UI-FloaterCollapse`, originally LGPL 2.1, by Kitty Barnett): Catznip adds
+/// a Collapse button beside Minimize; Aurora's Minimize already stays in place
+/// and restores downward like that Collapse, so only the width differs and no
+/// second button is added.
+pub fn minimized_width(expanded: f32, _official: f32) -> f32 {
+    expanded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -29,6 +42,14 @@ mod tests {
     fn a_fork_build_never_sends_a_crash_report() {
         for setting in [CrashReports::Ask, CrashReports::Always, CrashReports::Never] {
             assert_eq!(crash_reports(setting), CrashReports::Never, "{setting:?}");
+        }
+    }
+
+    /// A minimized window keeps its open width, narrow or wide.
+    #[test]
+    fn a_minimized_window_keeps_its_width() {
+        for (expanded, official) in [(440.0, 200.0), (150.0, 150.0), (900.0, 200.0)] {
+            assert_eq!(minimized_width(expanded, official), expanded);
         }
     }
 
